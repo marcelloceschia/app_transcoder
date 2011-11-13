@@ -1,0 +1,7 @@
+fork of https://asteriskvideo.svn.sourceforge.net/svnroot/asteriskvideo/app_transcoder/
+
+mkdir build
+cd build
+cmake ..
+make
+make install

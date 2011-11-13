@@ -1,0 +1,4 @@
+[Project]
+Name=app_transcoder
+Manager=KDevCMakeManager
+VersionControl=kdevgit

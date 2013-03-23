@@ -11,7 +11,7 @@ find_package(asterisk REQUIRED)
 add_library(app_transcoder SHARED app_transcoder.c)
 set_target_properties(app_transcoder PROPERTIES PREFIX "")
 
-target_link_libraries (app_transcoder avcodec) 
+target_link_libraries (app_transcoder avcodec swscale) 
 
 
 install (TARGETS app_transcoder DESTINATION ${ASTERISK_LIBRARY_DIR})

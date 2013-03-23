@@ -37,7 +37,7 @@
 #include <asterisk/pbx.h>
 #include <asterisk/module.h>
 #include <asterisk/causes.h>
-#include <asterisk/version.h>
+
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 
@@ -50,10 +50,24 @@
 #define PKT_SIZE        (sizeof(struct ast_frame) + AST_FRIENDLY_OFFSET + PKT_PAYLOAD)
 #define PKT_OFFSET      (sizeof(struct ast_frame) + AST_FRIENDLY_OFFSET)
 
-#if ASTERISK_VERSION_NUM>10600
+
 #define AST_FRAME_GET_BUFFER(fr)        ((unsigned char*)((fr)->data.ptr))
-#else
-#define AST_FRAME_GET_BUFFER(fr)        ((unsigned char*)((fr)->data))
+
+
+#ifndef CODEC_FLAG_OBMC
+#define CODEC_FLAG_OBMC           0x00000001
+#endif
+#ifndef CODEC_FLAG_H263P_AIV
+#define CODEC_FLAG_H263P_AIV      0x00000008
+#endif
+#ifndef CODEC_FLAG_H263P_UMV
+#define CODEC_FLAG_H263P_UMV      0x02000000
+#endif
+#ifndef CODEC_FLAG_H263P_SLICE_STRUCT
+#define CODEC_FLAG_H263P_SLICE_STRUCT 0x10000000
+#endif
+#ifndef CODEC_FLAG_PART
+#define CODEC_FLAG_PART   0x0080
 #endif
 
 
@@ -152,6 +166,7 @@ static void SendH263VideoFrame(struct VideoTranscoder *vtc)
 	uint32_t sent  = 0;
 	uint32_t len   = 0;
 	uint32_t size  = 0;
+	struct ast_format astFormat;
 			
 	/* Send */
 	while(sent<vtc->bufferLen)
@@ -219,7 +234,12 @@ static void SendH263VideoFrame(struct VideoTranscoder *vtc)
 		/* Set video type */
 		send->frametype = AST_FRAME_VIDEO;
 		/* Set codec value */
-		send->subclass.codec = vtc->encoderFormat | last;
+		ast_format_set(&send->subclass.format, vtc->encoderFormat, 0);
+		if(last){
+			//send->subclass.codec = vtc->encoderFormat | last;
+			ast_format_set_video_mark(&send->subclass.format);
+		}
+		
 		/* Rest of values*/
 		send->src = "transcoder";
 		send->delivery = ast_tv(0, 0);
@@ -328,7 +348,12 @@ static void SendH264VideoFrame(struct VideoTranscoder *vtc)
 			/* Set video type*/
 			send->frametype = AST_FRAME_VIDEO;
 			/* Set codec value */
-			send->subclass.codec = vtc->encoderFormat | lastNal;
+			//send->subclass.codec = vtc->encoderFormat | lastNal;
+			ast_format_set(&send->subclass.format, vtc->encoderFormat, 0);
+			if(lastNal){
+				//send->subclass.codec = vtc->encoderFormat | last;
+				ast_format_set_video_mark(&send->subclass.format);
+			}
 			/* Rest of values*/
 			send->src = "transcoder";
 			send->delivery = ast_tv(0, 0);
@@ -352,7 +377,7 @@ static void SendH264VideoFrame(struct VideoTranscoder *vtc)
 			       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 			      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 			      | FU indicator  |   FU header   |                               |
-			      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               |
+			      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-                             |
 			      |                                                               |
 			      |                         FU payload                            |
 			      |                                                               |
@@ -452,7 +477,12 @@ static void SendH264VideoFrame(struct VideoTranscoder *vtc)
 				/* Set video type */
 				send->frametype = AST_FRAME_VIDEO;
 				/* Set codec value */
-				send->subclass.codec = vtc->encoderFormat | (last & lastNal);
+				//send->subclass.codec = vtc->encoderFormat | (last & lastNal);
+				ast_format_set(&send->subclass.format, vtc->encoderFormat, 0);
+				if(last & lastNal){
+					//send->subclass.codec = vtc->encoderFormat | last;
+					ast_format_set_video_mark(&send->subclass.format);
+				}
 				/* Rest of values*/
 				send->src = "transcoder";
 				send->delivery = ast_tv(0, 0);
@@ -596,7 +626,7 @@ void * VideoTranscoderEncode(void *param)
 			vtc->encoderPic->linesize[2] = vtc->encoderWidth/2;
 
 			/* Encode */
-			vtc->bufferLen = avcodec_encode_video(vtc->encoderCtx,vtc->buffer,vtc->bufferSize,vtc->encoderPic);
+			vtc->bufferLen = avcodec_encode_video(vtc->encoderCtx, vtc->buffer, vtc->bufferSize, vtc->encoderPic);
 
 			/* Debug */
 			ast_log(LOG_DEBUG,"Encoded frame [%d,0x%.2x,0x%.2x,0x%.2x,0x%.2x]\n",vtc->bufferLen,vtc->buffer[0],vtc->buffer[1],vtc->buffer[2],vtc->buffer[3]);
@@ -689,6 +719,7 @@ static int VideoTranscoderDestroy(struct VideoTranscoder *vtc)
 static struct VideoTranscoder * VideoTranscoderCreate(struct ast_channel *channel,char *format)
 {
 	char *i;
+	AVDictionary *options;
 
 	/* Check params */
 	if (strncasecmp(format,"h263",4) && strncasecmp(format,"h264",4))
@@ -780,19 +811,20 @@ static struct VideoTranscoder * VideoTranscoderCreate(struct ast_channel *channe
 	vtc->newPic	= 0;
 	vtc->end 	= 0;
 
-	/* Alloc context */
-        vtc->decoderCtx = avcodec_alloc_context();
-        vtc->encoderCtx = avcodec_alloc_context();
-
+	
 	/* Allocate pictures */
         vtc->decoderPic = avcodec_alloc_frame();
         vtc->encoderPic = avcodec_alloc_frame();
 
 	/* Find encoder */
 	if (!strncasecmp(format,"h263",4))
-	{
+	{	  
 		/* H263 encoder */
 		vtc->encoder = avcodec_find_encoder(CODEC_ID_H263); 
+		
+		vtc->decoderCtx = avcodec_alloc_context3(vtc->encoder);
+		vtc->encoderCtx = avcodec_alloc_context3(vtc->encoder);
+		
 		/* Set rfc 2490 payload */
 		vtc->encoderFormat = AST_FORMAT_H263_PLUS;
 		/* Flags */
@@ -804,6 +836,10 @@ static struct VideoTranscoder * VideoTranscoderCreate(struct ast_channel *channe
 	} else if (!strncasecmp(format,"h264",4)) {
 		/* H264 encoder */
 		vtc->encoder = avcodec_find_encoder(CODEC_ID_H264); 
+		
+		vtc->decoderCtx = avcodec_alloc_context3(vtc->encoder);
+		vtc->encoderCtx = avcodec_alloc_context3(vtc->encoder);
+	
 		/* Set rfc payload */
 		vtc->encoderFormat = AST_FORMAT_H264;
 		/* Add x4->params.i_slice_max_size     = 1350; in X264_init function of in libavcodec/libx264.c */
@@ -811,10 +847,13 @@ static struct VideoTranscoder * VideoTranscoderCreate(struct ast_channel *channe
 		vtc->encoderCtx->refs = 1;
 		vtc->encoderCtx->scenechange_threshold = 0;
 		vtc->encoderCtx->me_subpel_quality = 0;
-		vtc->encoderCtx->partitions = X264_PART_I8X8 | X264_PART_I8X8;
+// 		vtc->encoderCtx->partitions = X264_PART_I8X8 | X264_PART_I8X8;
 		vtc->encoderCtx->me_method = ME_EPZS;
 		vtc->encoderCtx->trellis = 0;
 	}	
+	
+	/* Alloc context */
+	
 
 	ast_log(LOG_DEBUG,"-Transcoder [c=%d,f=%d,fps=%d,kb=%d,qmin=%d,qmax=%d,gs=%d]\n",vtc->encoderFormat,vtc->format,vtc->fps,vtc->bitrate,vtc->qMin,vtc->qMax,vtc->gop_size);
 
@@ -879,7 +918,7 @@ static struct VideoTranscoder * VideoTranscoderCreate(struct ast_channel *channe
         vtc->encoderCtx->i_quant_offset     = (float)0.0;
 	vtc->encoderCtx->qcompress	    = 0.6;
 	/* Open encoder */
-	vtc->encoderOpened = avcodec_open(vtc->encoderCtx, vtc->encoder) != -1;
+	vtc->encoderOpened = avcodec_open2(vtc->encoderCtx, vtc->encoder, NULL) != -1;
 
 	/* If not opened correctly */
 	if (!vtc->encoderOpened)
@@ -910,9 +949,17 @@ static int VideoTranscoderDecodeFrame(struct VideoTranscoder *vtc)
 	uint8_t *bufDecode;
 	int got_picture;
 	int i;
+	AVPacket avpkt;
+	
+	
+	av_init_packet(&avpkt);
+	
+	avpkt.size = vtc->frameLen;
+        avpkt.data = vtc->frame;
 
 	/* Decode */
-	avcodec_decode_video(vtc->decoderCtx,vtc->decoderPic,&got_picture,vtc->frame,vtc->frameLen);
+// 	avcodec_decode_video2(vtc->decoderCtx, vtc->decoderPic, &got_picture, vtc->frame, vtc->frameLen);
+	avcodec_decode_video2(vtc->decoderCtx, vtc->decoderPic, &got_picture, &avpkt);
 
 	/* If it can be decoded */
 	if (got_picture)
@@ -979,7 +1026,7 @@ static void VideoTranscoderSetDecoder(struct VideoTranscoder *vtc,int codec)
 	vtc->decoderCtx->flags |= CODEC_FLAG_PART;
 
         /* Open */
-        avcodec_open(vtc->decoderCtx, vtc->decoder);
+        avcodec_open2(vtc->decoderCtx, vtc->decoder, NULL);
 
 	/* We are open*/
 	vtc->decoderOpened = 1;
@@ -1142,7 +1189,7 @@ static uint32_t h264_append(uint8_t *dest, uint32_t destLen, uint32_t destSize, 
 			      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 			      |                         NALU 1 Data                           |
 			      :                                                               :
-			      +               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 			      |               | NALU 2 Size                   | NALU 2 HDR    |
 			      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 			      |                         NALU 2 Data                           |
@@ -1368,6 +1415,9 @@ static int app_transcode(struct ast_channel *chan, const char *data)
 	char *local;
 	char *a;
 	char *b;
+	
+	struct ast_format_cap *caps = NULL;
+	struct ast_format tmp_fmt;
 
 	/* Find fwd params */
 	if (!(a=strchr((char*)data,',')))
@@ -1386,14 +1436,22 @@ static int app_transcode(struct ast_channel *chan, const char *data)
 	revParams = strndup(b+1,strlen((char*)data)-(b-(char*)data)-1);
 
 	/* Log */
-	ast_log(LOG_WARNING,">Transcoding [%s,%s,%s,%x]\n",fwdParams,local,revParams,chan->nativeformats);
+// 	ast_log(LOG_WARNING,">Transcoding [%s,%s,%s,%x]\n", fwdParams, local, revParams, ast_channel_nativeformats(achan));
 
 	/* Create contexts */
 	fwd = VideoTranscoderCreate(pseudo,fwdParams);
 	rev = VideoTranscoderCreate(chan,revParams);
 
+	
+	caps = ast_format_cap_alloc_nolock();
+	ast_format_cap_copy(caps, ast_channel_nativeformats(chan));
+	ast_format_cap_add(caps, ast_format_set(&tmp_fmt, AST_FORMAT_H263, 0));
+	ast_format_cap_add(caps, ast_format_set(&tmp_fmt, AST_FORMAT_MPEG4, 0));
+	ast_format_cap_add(caps, ast_format_set(&tmp_fmt, AST_FORMAT_H263_PLUS, 0));
+	ast_format_cap_add(caps, ast_format_set(&tmp_fmt, AST_FORMAT_H264, 0));
+	
 	/* Request new channel */
-	pseudo = ast_request("Local", AST_FORMAT_H263 | AST_FORMAT_MPEG4 | AST_FORMAT_H263_PLUS | AST_FORMAT_H264 | chan->nativeformats, NULL, local, &reason);
+	pseudo = ast_request("Local", caps, NULL, local, &reason);
 
 
 	/* If somthing has gone wrong */
@@ -1406,7 +1464,7 @@ static int app_transcode(struct ast_channel *chan, const char *data)
 
 	/* Set caller id */
 	//ast_set_callerid(pseudo, chan->cid.cid_num, chan->cid.cid_name, chan->cid.cid_num);
-	ast_set_callerid(pseudo, chan->caller.id.number.str, chan->caller.id.name.str, chan->caller.id.number.str);
+	ast_set_callerid(pseudo, ast_channel_caller(chan)->id.number.str, ast_channel_caller(chan)->id.name.str, ast_channel_caller(chan)->id.number.str);
 
 
 	/* Place call */
@@ -1428,7 +1486,7 @@ static int app_transcode(struct ast_channel *chan, const char *data)
         ms = -1;
 
         /* while not setup */
-        while (pseudo->_state!=AST_STATE_UP)
+        while (  ast_channel_state(pseudo) != AST_STATE_UP)
         {
                 /* Wait for data */
                 if ((where = ast_waitfor_n(channels, 2, &ms))<0)
@@ -1448,7 +1506,7 @@ static int app_transcode(struct ast_channel *chan, const char *data)
 			if (f->frametype == AST_FRAME_CONTROL) 
 			{
 				/* Dependinf on the event */
-				switch (f->subclass.codec) {
+				switch (f->subclass.format.id) {
 					case AST_CONTROL_RINGING:       
 						break;
 					case AST_CONTROL_BUSY:
@@ -1456,7 +1514,7 @@ static int app_transcode(struct ast_channel *chan, const char *data)
                                                 /* Delete frame */
                                                 ast_frfree(f);
 						/* Save cause */
-						reason = pseudo->hangupcause;
+						reason = ast_channel_hangupcause(pseudo);
 						/* exit */
 						goto hangup_pseudo;
 						break;
@@ -1471,13 +1529,13 @@ static int app_transcode(struct ast_channel *chan, const char *data)
                         if (f->frametype == AST_FRAME_CONTROL)
                         {
                                 /* Depending on the event */
-                                switch (f->subclass.codec)
+                                switch (f->subclass.format.id)
                                 {
                                         case AST_CONTROL_HANGUP:
                                                 /* Delete frame */
                                                 ast_frfree(f);
                                                 /* Save cause */
-                                                reason = pseudo->hangupcause;
+                                                reason = ast_channel_hangupcause(pseudo);
                                                 /* exit */
                                                 goto hangup_pseudo;
                                                 break;
@@ -1489,7 +1547,7 @@ static int app_transcode(struct ast_channel *chan, const char *data)
 	}
 
 	/* If no answer */
-	if (pseudo->_state != AST_STATE_UP)
+	if ( ast_channel_state(pseudo) != AST_STATE_UP)
 		/* goto end */
 		goto clean_pseudo; 
 
@@ -1518,7 +1576,7 @@ static int app_transcode(struct ast_channel *chan, const char *data)
 				if (fwd)
 				{
 					/* Transcode */
-					VideoTranscoderWrite(fwd,f->subclass.codec,AST_FRAME_GET_BUFFER(f),f->datalen,f->subclass.codec & 1);
+					VideoTranscoderWrite(fwd, f->subclass.format.id, AST_FRAME_GET_BUFFER(f),f->datalen, ast_format_get_video_mark(&f->subclass.format));
 					/* Delete frame */
 					ast_frfree(f);
 				} else {
@@ -1527,7 +1585,7 @@ static int app_transcode(struct ast_channel *chan, const char *data)
 				}
 			} else if (f->frametype == AST_FRAME_CONTROL)  {
 				/* Check for hangup */
-				if (f->subclass.codec == AST_CONTROL_HANGUP)
+				if (f->subclass.integer == AST_CONTROL_HANGUP)
 				{
 					/* Hangup */
 					reason = AST_CAUSE_NORMAL_CLEARING;
@@ -1546,7 +1604,7 @@ static int app_transcode(struct ast_channel *chan, const char *data)
 				if (rev)
 				{
 					/* Transcode */
-					VideoTranscoderWrite(rev,f->subclass.codec,AST_FRAME_GET_BUFFER(f),f->datalen,f->subclass.codec & 1);
+					VideoTranscoderWrite(rev, f->subclass.format.id, AST_FRAME_GET_BUFFER(f), f->datalen, ast_format_get_video_mark(&f->subclass.format));
 					/* Delete frame */
 					ast_frfree(f);
 				} else {
@@ -1555,7 +1613,7 @@ static int app_transcode(struct ast_channel *chan, const char *data)
 				}
 			} else if (f->frametype == AST_FRAME_CONTROL)  {
 				/* Check for hangup */
-				if (f->subclass.codec == AST_CONTROL_HANGUP)
+				if (f->subclass.integer == AST_CONTROL_HANGUP)
 					/* Hangup */
 					reason = AST_CAUSE_NORMAL_CLEARING;
 				/* delete frame */
@@ -1638,7 +1696,7 @@ static int load_module(void)
 	av_log_set_callback(av_log_asterisk_callback);
 
 	/* Init avcodec */
-	avcodec_init();
+	avcodec_register_all();
 	
 	/* Register all codecs */	
 	avcodec_register_all();
